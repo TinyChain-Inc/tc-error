@@ -6,7 +6,6 @@ use std::convert::Infallible;
 use std::str::FromStr;
 use std::{fmt, io};
 
-use async_trait::async_trait;
 use destream::{de, en};
 
 /// A result of type `T`, or a [`TCError`]
@@ -20,7 +19,6 @@ struct ErrorData {
 
 struct DataVisitor;
 
-#[async_trait]
 impl de::Visitor for DataVisitor {
     type Value = ErrorData;
 
@@ -60,7 +58,6 @@ impl de::Visitor for DataVisitor {
     }
 }
 
-#[async_trait]
 impl de::FromStream for ErrorData {
     type Context = ();
 
@@ -159,7 +156,6 @@ impl FromStr for ErrorKind {
     }
 }
 
-#[async_trait]
 impl de::FromStream for ErrorKind {
     type Context = ();
 
@@ -408,7 +404,6 @@ impl From<Infallible> for TCError {
 
 struct ErrorVisitor;
 
-#[async_trait]
 impl de::Visitor for ErrorVisitor {
     type Value = TCError;
 
@@ -426,7 +421,6 @@ impl de::Visitor for ErrorVisitor {
     }
 }
 
-#[async_trait]
 impl de::FromStream for TCError {
     type Context = ();
 
