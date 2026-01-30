@@ -544,4 +544,3 @@ macro_rules! unavailable {
         $crate::TCError::new($crate::ErrorKind::Unavailable, format!($($t)*))
     }}
 }
-
