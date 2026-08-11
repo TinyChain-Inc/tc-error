@@ -12,12 +12,17 @@ keywords = ["tinychain", "error", "service", "mesh"]
 categories = ["rust-patterns"]
 
 [dependencies]
-async-trait = "0.1"
-destream = "0.10"
-ha-ndarray = { version = "0.5", optional = true }
+destream = { path = "../deps/destream", version = "0.10" }
+ha-ndarray = { path = "../deps/ha-ndarray", version = "0.5", optional = true }
 log = { version = "0.4", features = ["release_max_level_info"] }
 pathlink = { path = "../deps/pathlink" }
 rjwt = { version = "0.6", optional = true }
 serde = "1.0"
-txfs = { version = "~0.5.1", optional = true }
-txn_lock = { version = "0.11", optional = true }
+txfs = { path = "../deps/txfs", version = "~0.5.1", optional = true }
+txn_lock = { path = "../deps/txn_lock", version = "0.11", optional = true }
+
+[dev-dependencies]
+bytes = "1"
+destream_json = { path = "../deps/destream_json", version = "0.15" }
+futures = "0.3"
+tokio = { version = "1", features = ["macros", "rt"] }
