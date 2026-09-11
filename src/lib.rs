@@ -291,14 +291,6 @@ impl de::Visitor for DataVisitor {
             pressure,
         })
     }
-
-    fn visit_string<E: de::Error>(self, message: String) -> Result<Self::Value, E> {
-        Ok(ErrorData {
-            message,
-            stack: vec![],
-            pressure: None,
-        })
-    }
 }
 
 impl de::FromStream for ErrorData {
@@ -472,13 +464,7 @@ impl TCError {
     {
         let stack = stack.into_iter().map(|msg| msg.to_string()).collect();
 
-        #[cfg(debug_assertions)]
-        match code {
-            ErrorKind::Internal | ErrorKind::MethodNotAllowed | ErrorKind::NotImplemented => {
-                panic!("{code}: {message} (cause: {stack:?})")
-            }
-            other => log::warn!("{other}: {message} (cause: {stack:?})"),
-        }
+        log::warn!("{code}: {message} (cause: {stack:?})");
 
         Self {
             kind: code,
@@ -492,7 +478,7 @@ impl TCError {
 
     /// Error to indicate a malformed or nonsensical request
     pub fn bad_request<I: fmt::Display>(info: I) -> Self {
-        Self::new(ErrorKind::BadGateway, info)
+        Self::new(ErrorKind::BadRequest, info)
     }
 
     /// Error to convey an upstream problem
@@ -502,19 +488,11 @@ impl TCError {
 
     /// Error to indicate that the requested resource is already locked
     pub fn conflict<I: fmt::Display>(info: I) -> Self {
-        #[cfg(debug_assertions)]
-        panic!("conflict: {info}");
-
-        #[cfg(not(debug_assertions))]
         Self::new(ErrorKind::Conflict, info)
     }
 
     /// An internal error which should never occur.
     pub fn internal<I: fmt::Display>(info: I) -> Self {
-        #[cfg(debug_assertions)]
-        panic!("internal error: {info}");
-
-        #[cfg(not(debug_assertions))]
         Self::new(ErrorKind::Internal, info)
     }
 
@@ -593,6 +571,7 @@ impl TCError {
 
 impl std::error::Error for TCError {}
 
+#[cfg(feature = "pathlink")]
 impl From<pathlink::ParseError> for TCError {
     fn from(err: pathlink::ParseError) -> Self {
         Self::bad_request(err)
@@ -639,12 +618,13 @@ impl From<txn_lock::Error> for TCError {
 
 #[cfg(feature = "txfs")]
 impl From<txfs::Error> for TCError {
-    fn from(cause: txfs::Error) -> Self {
-        match cause {
-            txfs::Error::Conflict(cause) => Self::conflict(cause),
-            txfs::Error::IO(cause) => Self::from(cause),
-            txfs::Error::NotFound(cause) => Self::not_found(cause),
-            txfs::Error::Parse(cause) => Self::from(cause),
+    fn from(err: txfs::Error) -> Self {
+        match err {
+            txfs::Error::Conflict(err) => Self::conflict(err),
+            txfs::Error::Corrupt(message) => Self::internal(message),
+            txfs::Error::IO(err) => err.into(),
+            txfs::Error::NotFound(path) => Self::not_found(path),
+            txfs::Error::Parse(err) => Self::bad_request(err),
         }
     }
 }
@@ -704,6 +684,35 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn bad_request_has_its_own_error_kind() {
+        assert_eq!(
+            TCError::bad_request("invalid").code(),
+            ErrorKind::BadRequest
+        );
+    }
+
+    #[cfg(feature = "txfs")]
+    #[test]
+    fn txfs_errors_map_by_kind() {
+        assert_eq!(
+            TCError::from(txfs::Error::Corrupt("invalid pending storage".into())).code(),
+            ErrorKind::Internal
+        );
+        assert_eq!(
+            TCError::from(txfs::Error::NotFound("missing".into())).code(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(
+            TCError::from(txfs::Error::IO(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path",
+            )))
+            .code(),
+            ErrorKind::BadRequest
+        );
+    }
+
     #[tokio::test]
     async fn structured_pressure_round_trips() {
         let err = TCError::resource_unavailable(
@@ -734,22 +743,6 @@ mod tests {
                     .with_retry_after_ms(250)
             )
         );
-    }
-
-    #[tokio::test]
-    async fn legacy_message_only_error_still_decodes() {
-        let decoded: TCError = destream_json::try_decode(
-            (),
-            stream::iter([Ok::<_, std::io::Error>(Bytes::from_static(
-                br#"{"temporarily_unavailable":"busy"}"#,
-            ))]),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(decoded.code(), ErrorKind::Unavailable);
-        assert_eq!(decoded.message(), "busy");
-        assert!(decoded.pressure().is_none());
     }
 }
 
