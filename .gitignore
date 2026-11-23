@@ -1,0 +1,9 @@
+/target/
+__pycache__/
+*.py[cod]
+*.rs.bk
+*.pdb
+.idea/
+.vscode/
+
+# Cargo.lock is tracked for reproducible standalone CI.

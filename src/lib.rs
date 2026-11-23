@@ -1,9 +1,5 @@
 #![forbid(unsafe_code)]
-
-//! Provides common error types and associated convenience methods for
-//! TinyChain.
-//!
-//! This crate is a part of TinyChain: [http://github.com/haydnv/tinychain](http://github.com/haydnv/tinychain)
+#![doc = include_str!("../README.md")]
 
 use std::convert::Infallible;
 use std::str::FromStr;
@@ -236,6 +232,7 @@ impl de::FromStream for Pressure {
 impl<'en> en::IntoStream<'en> for Pressure {
     fn into_stream<E: en::Encoder<'en>>(self, encoder: E) -> Result<E::Ok, E::Error> {
         use en::EncodeMap;
+
         let size = if self.retry_after_ms.is_some() { 4 } else { 3 };
         let mut map = encoder.encode_map(Some(size))?;
         map.encode_entry("resource", self.resource)?;
@@ -251,6 +248,7 @@ impl<'en> en::IntoStream<'en> for Pressure {
 impl<'en> en::ToStream<'en> for Pressure {
     fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
         use en::EncodeMap;
+
         let size = if self.retry_after_ms.is_some() { 4 } else { 3 };
         let mut map = encoder.encode_map(Some(size))?;
         map.encode_entry("resource", &self.resource)?;
@@ -304,6 +302,7 @@ impl de::FromStream for ErrorData {
 impl<'en> en::IntoStream<'en> for ErrorData {
     fn into_stream<E: en::Encoder<'en>>(self, encoder: E) -> Result<E::Ok, E::Error> {
         use en::EncodeMap;
+
         let size = 2 + usize::from(self.pressure.is_some());
         let mut map = encoder.encode_map(Some(size))?;
         map.encode_entry("message", self.message)?;
@@ -318,6 +317,7 @@ impl<'en> en::IntoStream<'en> for ErrorData {
 impl<'en> en::ToStream<'en> for ErrorData {
     fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
         use en::EncodeMap;
+
         let size = 2 + usize::from(self.pressure.is_some());
         let mut map = encoder.encode_map(Some(size))?;
         map.encode_entry("message", &self.message)?;
@@ -442,15 +442,34 @@ impl fmt::Display for ErrorKind {
 pub struct TCError {
     kind: ErrorKind,
     data: ErrorData,
+    recovery_required: bool,
 }
 
 impl TCError {
+    /// Locally detected storage inconsistency. This authority is never serialized.
+    pub fn recovery_required(message: impl fmt::Display) -> Self {
+        let mut error = Self::internal(message);
+        error.recovery_required = true;
+        error
+    }
+
+    /// Whether the local caller must stop using affected storage and recover it.
+    pub fn requires_recovery(&self) -> bool {
+        self.recovery_required
+    }
+
+    /// Retained diagnostic causes for local logging, without changing wire errors.
+    pub fn causes(&self) -> &[String] {
+        &self.data.stack
+    }
+
     /// Returns a new error with the given code and message.
     pub fn new<I: fmt::Display>(code: ErrorKind, message: I) -> Self {
         log::warn!("{code}: {message}");
 
         Self {
             kind: code,
+            recovery_required: false,
             data: message.into(),
         }
     }
@@ -468,6 +487,7 @@ impl TCError {
 
         Self {
             kind: code,
+            recovery_required: false,
             data: ErrorData {
                 message: message.to_string(),
                 stack,
@@ -572,6 +592,13 @@ impl TCError {
 impl std::error::Error for TCError {}
 
 #[cfg(feature = "pathlink")]
+impl From<hr_id::ParseError> for TCError {
+    fn from(err: hr_id::ParseError) -> Self {
+        Self::bad_request(err)
+    }
+}
+
+#[cfg(feature = "pathlink")]
 impl From<pathlink::ParseError> for TCError {
     fn from(err: pathlink::ParseError) -> Self {
         Self::bad_request(err)
@@ -588,10 +615,6 @@ impl From<ha_ndarray::Error> for TCError {
 #[cfg(feature = "rjwt")]
 impl From<rjwt::Error> for TCError {
     fn from(err: rjwt::Error) -> Self {
-        #[cfg(debug_assertions)]
-        panic!("rjwt error: {err}");
-
-        #[cfg(not(debug_assertions))]
         match err.into_inner() {
             (rjwt::ErrorKind::Auth | rjwt::ErrorKind::Time, msg) => Self::unauthorized(msg),
             (rjwt::ErrorKind::Base64 | rjwt::ErrorKind::Format | rjwt::ErrorKind::Json, msg) => {
@@ -606,6 +629,7 @@ impl From<rjwt::Error> for TCError {
 impl From<txn_lock::Error> for TCError {
     fn from(err: txn_lock::Error) -> Self {
         match err {
+            txn_lock::Error::Interrupted => Self::recovery_required(err),
             txn_lock::Error::Saturated => Self::resource_unavailable(
                 err,
                 Pressure::new("/host/resource/queue", PressureReason::Saturated)
@@ -621,7 +645,7 @@ impl From<txfs::Error> for TCError {
     fn from(err: txfs::Error) -> Self {
         match err {
             txfs::Error::Conflict(err) => Self::conflict(err),
-            txfs::Error::Corrupt(message) => Self::internal(message),
+            txfs::Error::Corrupt(message) => Self::recovery_required(message),
             txfs::Error::IO(err) => err.into(),
             txfs::Error::NotFound(path) => Self::not_found(path),
             txfs::Error::Parse(err) => Self::bad_request(err),
@@ -631,12 +655,13 @@ impl From<txfs::Error> for TCError {
 
 impl From<io::Error> for TCError {
     fn from(cause: io::Error) -> Self {
+        #[cfg(feature = "freqfs")]
+        if freqfs::IntegrityError::is_marked(&cause) {
+            return Self::recovery_required(&cause).consume(cause);
+        }
+
         match cause.kind() {
             io::ErrorKind::AlreadyExists => {
-                #[cfg(debug_assertions)]
-                panic!("tried to create an entry that already exists: {}", cause);
-
-                #[cfg(not(debug_assertions))]
                 bad_request!("tried to create an entry that already exists").consume(cause)
             }
             io::ErrorKind::InvalidInput => bad_request!("{}", cause),
@@ -655,12 +680,9 @@ impl From<io::Error> for TCError {
             )
             .consume(cause),
             io::ErrorKind::ResourceBusy => TCError::resource_unavailable(
-                "host file-handle capacity exhausted",
-                Pressure::new(
-                    "/host/resource/storage/file-handle",
-                    PressureReason::Saturated,
-                )
-                .with_retry_after_ms(1000),
+                &cause,
+                Pressure::new("/host/resource", PressureReason::Saturated)
+                    .with_retry_after_ms(1000),
             )
             .consume(cause),
             io::ErrorKind::WouldBlock => {
@@ -677,75 +699,6 @@ impl From<Infallible> for TCError {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use bytes::Bytes;
-    use futures::{stream, TryStreamExt};
-
-    use super::*;
-
-    #[test]
-    fn bad_request_has_its_own_error_kind() {
-        assert_eq!(
-            TCError::bad_request("invalid").code(),
-            ErrorKind::BadRequest
-        );
-    }
-
-    #[cfg(feature = "txfs")]
-    #[test]
-    fn txfs_errors_map_by_kind() {
-        assert_eq!(
-            TCError::from(txfs::Error::Corrupt("invalid pending storage".into())).code(),
-            ErrorKind::Internal
-        );
-        assert_eq!(
-            TCError::from(txfs::Error::NotFound("missing".into())).code(),
-            ErrorKind::NotFound
-        );
-        assert_eq!(
-            TCError::from(txfs::Error::IO(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "invalid path",
-            )))
-            .code(),
-            ErrorKind::BadRequest
-        );
-    }
-
-    #[tokio::test]
-    async fn structured_pressure_round_trips() {
-        let err = TCError::resource_unavailable(
-            "request capacity exhausted",
-            Pressure::new("/host/resource/request", PressureReason::Saturated)
-                .with_retry_after_ms(250),
-        );
-        let encoded = destream_json::encode(err)
-            .unwrap()
-            .try_fold(Vec::new(), |mut bytes, chunk| async move {
-                bytes.extend_from_slice(&chunk);
-                Ok(bytes)
-            })
-            .await
-            .unwrap();
-        let decoded: TCError = destream_json::try_decode(
-            (),
-            stream::iter([Ok::<_, std::io::Error>(Bytes::from(encoded))]),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(decoded.code(), ErrorKind::Unavailable);
-        assert_eq!(
-            decoded.pressure(),
-            Some(
-                &Pressure::new("/host/resource/request", PressureReason::Saturated)
-                    .with_retry_after_ms(250)
-            )
-        );
-    }
-}
-
 struct ErrorVisitor;
 
 impl de::Visitor for ErrorVisitor {
@@ -758,7 +711,11 @@ impl de::Visitor for ErrorVisitor {
     async fn visit_map<A: de::MapAccess>(self, mut access: A) -> Result<Self::Value, A::Error> {
         if let Some(kind) = access.next_key(()).await? {
             let data = access.next_value(()).await?;
-            Ok(TCError { kind, data })
+            Ok(TCError {
+                kind,
+                data,
+                recovery_required: false,
+            })
         } else {
             Err(de::Error::invalid_length(0, Self::expecting()))
         }
@@ -776,6 +733,7 @@ impl de::FromStream for TCError {
 impl<'en> en::IntoStream<'en> for TCError {
     fn into_stream<E: en::Encoder<'en>>(self, encoder: E) -> Result<E::Ok, E::Error> {
         use en::EncodeMap;
+
         let mut map = encoder.encode_map(Some(1))?;
         map.encode_entry(self.kind, self.data)?;
         map.end()
@@ -785,6 +743,7 @@ impl<'en> en::IntoStream<'en> for TCError {
 impl<'en> en::ToStream<'en> for TCError {
     fn to_stream<E: en::Encoder<'en>>(&'en self, encoder: E) -> Result<E::Ok, E::Error> {
         use en::EncodeMap;
+
         let mut map = encoder.encode_map(Some(1))?;
         map.encode_entry(self.kind, &self.data)?;
         map.end()
@@ -883,4 +842,154 @@ macro_rules! unavailable {
     ($($t:tt)*) => {{
         $crate::TCError::new($crate::ErrorKind::Unavailable, format!($($t)*))
     }}
+}
+
+#[cfg(feature = "fensor")]
+impl From<fensor::Error> for TCError {
+    fn from(error: fensor::Error) -> Self {
+        match error {
+            fensor::Error::Io(error) => error.into(),
+            fensor::Error::Nd(error) => error.into(),
+            fensor::Error::InvalidSchema(message) | fensor::Error::InvalidCoord(message) => {
+                Self::bad_request(message)
+            }
+            fensor::Error::Unsupported(message) => Self::unsupported(message),
+            error @ (fensor::Error::UnsupportedSparseIterationOrder { .. }
+            | fensor::Error::WouldDensify { .. }) => Self::unsupported(error),
+            error => Self::internal(error),
+        }
+    }
+}
+
+#[cfg(all(test, feature = "freqfs"))]
+#[path = "../tests/unit/integrity.rs"]
+mod integrity_tests;
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use futures::{stream, TryStreamExt};
+
+    use super::*;
+
+    #[cfg(feature = "pathlink")]
+    #[test]
+    fn parser_failures_convert_to_bad_request() {
+        for error in [
+            TCError::from("..".parse::<hr_id::Id>().unwrap_err()),
+            TCError::from("ftp://example.com/".parse::<pathlink::Link>().unwrap_err()),
+        ] {
+            assert_eq!(error.code(), ErrorKind::BadRequest);
+        }
+    }
+
+    #[test]
+    fn bad_request_has_its_own_error_kind() {
+        assert_eq!(
+            TCError::bad_request("invalid").code(),
+            ErrorKind::BadRequest
+        );
+    }
+
+    #[test]
+    fn existing_storage_is_a_bad_request() {
+        let error = TCError::from(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "existing root",
+        ));
+
+        assert_eq!(error.code(), ErrorKind::BadRequest);
+    }
+
+    #[cfg(feature = "rjwt")]
+    #[test]
+    fn token_failures_are_structured_errors() {
+        for (kind, expected) in [
+            (rjwt::ErrorKind::Auth, ErrorKind::Unauthorized),
+            (rjwt::ErrorKind::Time, ErrorKind::Unauthorized),
+            (rjwt::ErrorKind::Base64, ErrorKind::BadRequest),
+            (rjwt::ErrorKind::Format, ErrorKind::BadRequest),
+            (rjwt::ErrorKind::Json, ErrorKind::BadRequest),
+            (rjwt::ErrorKind::Fetch, ErrorKind::BadGateway),
+        ] {
+            let error = TCError::from(rjwt::Error::new(kind, "token failure".into()));
+            assert_eq!(error.code(), expected);
+        }
+    }
+
+    #[test]
+    fn resource_busy_preserves_the_owning_error() {
+        for message in [
+            "cache capacity is exhausted",
+            "file handle capacity is exhausted",
+        ] {
+            let error = TCError::from(io::Error::new(io::ErrorKind::ResourceBusy, message));
+            assert_eq!(error.code(), ErrorKind::Unavailable);
+            assert_eq!(error.data.message, message);
+            assert_eq!(
+                error.pressure(),
+                Some(
+                    &Pressure::new("/host/resource", PressureReason::Saturated)
+                        .with_retry_after_ms(1000)
+                )
+            );
+        }
+    }
+
+    #[cfg(feature = "txfs")]
+    #[test]
+    fn txfs_errors_map_by_kind() {
+        assert_eq!(
+            TCError::from(txfs::Error::Corrupt("invalid pending storage".into())).code(),
+            ErrorKind::Internal
+        );
+
+        assert_eq!(
+            TCError::from(txfs::Error::NotFound("missing".into())).code(),
+            ErrorKind::NotFound
+        );
+
+        assert_eq!(
+            TCError::from(txfs::Error::IO(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid path",
+            )))
+            .code(),
+            ErrorKind::BadRequest
+        );
+    }
+
+    #[tokio::test]
+    async fn structured_pressure_round_trips() {
+        let err = TCError::resource_unavailable(
+            "request capacity exhausted",
+            Pressure::new("/host/resource/request", PressureReason::Saturated)
+                .with_retry_after_ms(250),
+        );
+
+        let encoded = destream_json::encode(err)
+            .unwrap()
+            .try_fold(Vec::new(), |mut bytes, chunk| async move {
+                bytes.extend_from_slice(&chunk);
+                Ok(bytes)
+            })
+            .await
+            .unwrap();
+
+        let decoded: TCError = destream_json::try_decode(
+            (),
+            stream::iter([Ok::<_, std::io::Error>(Bytes::from(encoded))]),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(decoded.code(), ErrorKind::Unavailable);
+        assert_eq!(
+            decoded.pressure(),
+            Some(
+                &Pressure::new("/host/resource/request", PressureReason::Saturated)
+                    .with_retry_after_ms(250)
+            )
+        );
+    }
 }

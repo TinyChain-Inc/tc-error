@@ -5,13 +5,16 @@ authors = ["code@tinychain.net"]
 edition = "2021"
 description = "TinyChain's generic error struct"
 license = "Apache-2.0"
-repository = "https://github.com/haydnv/tinychain.git"
+repository = "https://github.com/TinyChain-Inc/tc-error.git"
 readme = "README.md"
 
 keywords = ["tinychain", "error", "service", "mesh"]
 categories = ["rust-patterns"]
 
 [dependencies]
+hr-id = { path = "../deps/hr-id", version = "0.7", optional = true }
+freqfs = { path = "../deps/freqfs", optional = true }
+fensor = { path = "../deps/fensor", optional = true }
 destream = { path = "../deps/destream", version = "0.10" }
 ha-ndarray = { path = "../deps/ha-ndarray", version = "0.5", optional = true }
 log = { version = "0.4", features = ["release_max_level_info"] }
@@ -22,8 +25,10 @@ txn_lock = { path = "../deps/txn_lock", version = "0.11", optional = true }
 txfs = { path = "../deps/txfs", version = "~0.5.1", optional = true }
 
 [features]
-pathlink = ["dep:pathlink"]
-txfs = ["dep:txfs"]
+fensor = ["dep:fensor", "ha-ndarray", "freqfs"]
+ha-ndarray = ["dep:ha-ndarray"]
+pathlink = ["dep:pathlink", "dep:hr-id"]
+txfs = ["dep:txfs", "freqfs"]
 
 [dev-dependencies]
 bytes = "1"

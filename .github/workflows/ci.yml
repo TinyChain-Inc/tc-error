@@ -1,0 +1,83 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_BUILD_JOBS: "1"
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_DEV_DEBUG: "0"
+  CARGO_PROFILE_TEST_DEBUG: "0"
+
+defaults:
+  run:
+    working-directory: tc-error
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tc-error
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: Fetch pinned dependencies
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDENCY_READ_TOKEN || github.token }}
+        run: |
+          gh auth setup-git
+          python3 ci/bootstrap.py
+      - run: cargo fmt -- --check
+
+  test:
+    name: test (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: default
+            args: ""
+          - name: all-features
+            args: --all-features
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: tc-error
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: Fetch pinned dependencies
+        env:
+          GH_TOKEN: ${{ secrets.DEPENDENCY_READ_TOKEN || github.token }}
+        run: |
+          gh auth setup-git
+          python3 ci/bootstrap.py
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tc-error
+          key: ${{ matrix.name }}-${{ hashFiles('tc-error/ci/dependencies.json') }}
+      - run: cargo clippy --locked --all-targets ${{ matrix.args }} -- -D warnings
+      - run: cargo test --locked --lib ${{ matrix.args }}
+      - if: matrix.name == 'all-features'
+        run: |
+          cargo test --locked --doc --all-features
+          for feature in pathlink txn_lock txfs ha-ndarray fensor rjwt freqfs; do
+            cargo check --locked --lib --no-default-features --features "$feature"
+          done
